@@ -1,0 +1,135 @@
+use std::{fmt::Debug, u32};
+
+mod tests;
+
+const CRC32_LOOKUP_SIZE: usize = 0x100;
+
+/// A CRC generator polynomial in either normal or reversed representation.
+pub enum Polynomial {
+    Normal(u32),
+    Reversed(u32),
+}
+
+/// Generator with polynomial and init and final xor values.
+pub struct Generator {
+    polynomial: Polynomial, // Generator polynomial.
+    init_xor: u32,          // Value initially XORed with input
+    final_xor: u32,         // Value eventually XORed with output
+}
+
+/// Reverse bit notation in a u32
+fn reverse_u32(n: u32) -> u32 {
+    let mut res = 0u32;
+    for i in 0..16 {
+        res |= ((n >> (31 - i)) & 1) << i;
+        res |= ((n >> i) & 1) << (31 - i);
+    }
+    res
+}
+
+impl Generator {
+    /// Reversed polynomial representation (LSB is term of highest degree in polynomial)
+    fn reversed(&self) -> u32 {
+        match self.polynomial {
+            Polynomial::Normal(generator) => reverse_u32(generator),
+            Polynomial::Reversed(generator) => generator,
+        }
+    }
+
+    /// Normal polynomial representation (MSB is term of highest degree in polynomial)
+    fn normal(&self) -> u32 {
+        match self.polynomial {
+            Polynomial::Normal(generator) => generator,
+            Polynomial::Reversed(generator) => reverse_u32(generator),
+        }
+    }
+}
+
+pub struct CRC32 {
+    generator: Generator,
+    table: [u32; CRC32_LOOKUP_SIZE], // 8 bit lookup side
+}
+
+/// Compute register mask in forward table at index `index`.
+/// `index` should be given in little endian representation
+/// `generator` is the CRC generator polynomial
+fn compute_register_mask(index: u8, generator: &Generator) -> u32 {
+    let mut register = u64::from(index);
+    let polynomial = u64::from(generator.reversed());
+    for _ in 0..8 {
+        let div = register & 1;
+        register >>= 1;
+        if div == 1 {
+            // Since the polynomial is given without the leading 1 (term of degree 32
+            // is not given), subtraction is done AFTER shift
+            register ^= polynomial;
+        }
+    }
+    register as u32
+}
+
+impl CRC32 {
+    /// Create CRC32 instance with generator polynomial `generator`.
+    pub fn new(generator: Generator) -> Self {
+        let mut table = [0u32; CRC32_LOOKUP_SIZE];
+        for i in 0..CRC32_LOOKUP_SIZE {
+            table[i] = compute_register_mask(i as u8, &generator);
+        }
+        Self { generator, table }
+    }
+
+    /// Perform a single one-byte step using table.
+    fn step(&self, register: &mut u32, next_byte: u8) {
+        let index = *register & 0xff;
+        println!("index = {index}");
+        let mask = self.table[index as usize];
+        *register >>= 8;
+        *register |= u32::from(next_byte) << 24;
+        *register ^= mask;
+    }
+
+    /// Compute CRC32 checksum for `data`.
+    /// Input data must be in little-endian representation.
+    pub fn compute<'a, T>(&self, data: T) -> u32
+    where
+        T: Iterator<Item = &'a u8>,
+    {
+        // CRC is remainder of data times X^N where N = deg(generator)
+        // In CRC32, N = 32 bits
+        let mut data = data.chain([0u8; 4].iter());
+
+        // Initialize CRC register
+        let mut register: u32 = 0;
+        for _ in 0..4 {
+            let b = data.next().unwrap(); // unwrap ok because just added 4 elements
+            register >>= 8;
+            register |= u32::from(*b) << 24;
+        }
+        register ^= self.generator.init_xor;
+
+        while let Some(b) = data.next() {
+            self.step(&mut register, *b);
+        }
+
+        register ^ self.generator.final_xor
+    }
+}
+
+impl Debug for CRC32 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "Polynomial = 0x{:08x} (normal repr)",
+            self.generator.normal()
+        )?;
+        writeln!(f, "Table:")?;
+        for i in 0..0x20 {
+            write!(f, "{:02x}: ", i << 3)?;
+            for j in 0..8 {
+                write!(f, "{:08x} ", self.table[i * 8 + j])?;
+            }
+            writeln!(f, "")?;
+        }
+        Ok(())
+    }
+}
