@@ -1,46 +1,25 @@
 use std::{fmt::Debug, u32};
 
-mod tests;
+mod error;
+
+pub mod math;
+use math::{Polynomial, PolynomialRepr};
 
 const CRC32_LOOKUP_SIZE: usize = 0x100;
 
-/// A CRC generator polynomial in either normal or reversed representation.
-pub enum Polynomial {
-    Normal(u32),
-    Reversed(u32),
-}
-
 /// Generator with polynomial and init and final xor values.
 pub struct Generator {
-    polynomial: Polynomial, // Generator polynomial.
-    init_xor: u32,          // Value initially XORed with input
-    final_xor: u32,         // Value eventually XORed with output
+    polynomial: Polynomial<u32>, // Generator polynomial (highest term is implicitly of degree 32)
+    init_xor: u32,               // Value initially XORed with input
+    final_xor: u32,              // Value eventually XORed with output
 }
 
-/// Reverse bit notation in a u32
-fn reverse_u32(n: u32) -> u32 {
-    let mut res = 0u32;
-    for i in 0..16 {
-        res |= ((n >> (31 - i)) & 1) << i;
-        res |= ((n >> i) & 1) << (31 - i);
-    }
-    res
-}
-
-impl Generator {
-    /// Reversed polynomial representation (LSB is term of highest degree in polynomial)
-    fn reversed(&self) -> u32 {
-        match self.polynomial {
-            Polynomial::Normal(generator) => reverse_u32(generator),
-            Polynomial::Reversed(generator) => generator,
-        }
-    }
-
-    /// Normal polynomial representation (MSB is term of highest degree in polynomial)
-    fn normal(&self) -> u32 {
-        match self.polynomial {
-            Polynomial::Normal(generator) => generator,
-            Polynomial::Reversed(generator) => reverse_u32(generator),
+impl Default for Generator {
+    fn default() -> Self {
+        Self {
+            polynomial: Polynomial::from(PolynomialRepr::Normal(0x04c11db7)),
+            init_xor: 0xffffffff,
+            final_xor: 0xffffffff,
         }
     }
 }
@@ -53,9 +32,9 @@ pub struct CRC32 {
 /// Compute register mask in forward table at index `index`.
 /// `index` should be given in little endian representation
 /// `generator` is the CRC generator polynomial
-fn compute_register_mask(index: u8, generator: &Generator) -> u32 {
-    let mut register = u64::from(index);
-    let polynomial = u64::from(generator.reversed());
+fn precompute_table(index: u8, generator: &Generator) -> u32 {
+    let mut register = u32::from(index);
+    let polynomial: u32 = generator.polynomial.0;
     for _ in 0..8 {
         let div = register & 1;
         register >>= 1;
@@ -65,7 +44,7 @@ fn compute_register_mask(index: u8, generator: &Generator) -> u32 {
             register ^= polynomial;
         }
     }
-    register as u32
+    register
 }
 
 impl CRC32 {
@@ -73,7 +52,7 @@ impl CRC32 {
     pub fn new(generator: Generator) -> Self {
         let mut table = [0u32; CRC32_LOOKUP_SIZE];
         for i in 0..CRC32_LOOKUP_SIZE {
-            table[i] = compute_register_mask(i as u8, &generator);
+            table[i] = precompute_table(i as u8, &generator);
         }
         Self { generator, table }
     }
@@ -81,7 +60,6 @@ impl CRC32 {
     /// Perform a single one-byte step using table.
     fn step(&self, register: &mut u32, next_byte: u8) {
         let index = *register & 0xff;
-        println!("index = {index}");
         let mask = self.table[index as usize];
         *register >>= 8;
         *register |= u32::from(next_byte) << 24;
@@ -119,8 +97,8 @@ impl Debug for CRC32 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(
             f,
-            "Polynomial = 0x{:08x} (normal repr)",
-            self.generator.normal()
+            "Generator = {:?}",
+            Polynomial::from(PolynomialRepr::Normal(1u64 << 32)) + self.generator.polynomial.into()
         )?;
         writeln!(f, "Table:")?;
         for i in 0..0x20 {
@@ -131,5 +109,28 @@ impl Debug for CRC32 {
             writeln!(f, "")?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{CRC32, Generator};
+
+    #[test]
+    pub fn test_single_letter() {
+        let crc = CRC32::new(Generator::default());
+        assert_eq!(crc.compute(b"a".iter()), 0xe8b7be43);
+    }
+
+    #[test]
+    pub fn test_empty() {
+        let crc = CRC32::new(Generator::default());
+        assert_eq!(crc.compute(b"".iter()), 0);
+    }
+
+    #[test]
+    pub fn test_hello() {
+        let crc = CRC32::new(Generator::default());
+        assert_eq!(crc.compute(b"hello, world!".iter()), 0x58988d13);
     }
 }
