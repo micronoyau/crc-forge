@@ -33,7 +33,6 @@ pub struct CRC32 {
     generator: Generator,            // Generator G
     table: [u32; CRC32_LOOKUP_SIZE], // 8 bit lookup side
     xn_inv: Polynomial<u32>,         // (X^N)-1 mod G
-    m: u32,                          // m = CRC(0)
 }
 
 /// Compute register mask in forward table at index `index`.
@@ -67,17 +66,10 @@ impl CRC32 {
         let xn = Polynomial::from(PolynomialRepr::Normal(1u64 << 32));
         let xn_inv = xn.inv_mod(generator.g_full)?.try_into()?;
 
-        // Precompute CRC(0) = (I mod G) ^ F
-        let i = Polynomial::from(PolynomialRepr::Reverse(generator.i));
-        let f = Polynomial::from(PolynomialRepr::Reverse(generator.f));
-        let m: Polynomial<u32> = ((i * xn + f.into()) % generator.g_full).try_into()?;
-        let m = m.repr();
-
         Ok(Self {
             generator,
             table,
             xn_inv,
-            m,
         })
     }
 
@@ -90,34 +82,42 @@ impl CRC32 {
         *register ^= mask;
     }
 
+    /// Compute fast remainder of data by generator polynomial using precomputed tables.
+    /// `data` is the data to process, `register` is the CRC register to start with.
+    fn fast_rem<'a, T>(&self, mut data: T, register: u32) -> u32
+    where
+        T: Iterator<Item = &'a u8>,
+    {
+        let mut reg = 0u32;
+        for _ in 0..4 {
+            reg >>= 8;
+            if let Some(b) = data.next() {
+                reg |= u32::from(*b) << 24;
+            }
+        }
+        reg ^= register;
+
+        while let Some(b) = data.next() {
+            self.step(&mut reg, *b);
+        }
+
+        reg
+    }
+
     /// Compute CRC32 checksum for `data`.
     /// Input data must be in little-endian representation.
     pub fn checksum<'a, T>(&self, data: T) -> u32
     where
         T: Iterator<Item = &'a u8>,
     {
-        // CRC is remainder of data times X^N where N = deg(generator)
+        // CRC is remainder of data times X^N where N = deg(G)
         // In CRC32, N = 32 bits
-        let mut data = data.chain([0u8; 4].iter());
-
-        // Initialize CRC register
-        let mut register: u32 = 0;
-        for _ in 0..4 {
-            let b = data.next().unwrap(); // unwrap ok because just added 4 elements
-            register >>= 8;
-            register |= u32::from(*b) << 24;
-        }
-        register ^= self.generator.i;
-
-        while let Some(b) = data.next() {
-            self.step(&mut register, *b);
-        }
-
-        register ^ self.generator.f
+        let data = data.chain([0u8; 4].iter());
+        self.fast_rem(data, self.generator.i) ^ self.generator.f
     }
 
-    /// Compute 4-byte suffix to `data` so that resulting CRC is `target_crc`.
-    pub fn compute_suffix<'a, T>(&self, data: T, target_crc: u32) -> [u8; 4]
+    /// Compute suffix polynomial to `data` so that resulting CRC is `target_crc`.
+    fn compute_suffix_core<'a, T>(&self, data: T, target_crc: u32) -> Polynomial<u32>
     where
         T: Iterator<Item = &'a u8>,
     {
@@ -128,9 +128,80 @@ impl CRC32 {
         let res: Polynomial<u32> = (((cp + f) * self.xn_inv) % self.generator.g_full)
             .try_into()
             .unwrap();
+        res + c + f
+    }
+
+    /// Compute 4-byte suffix to `data` so that resulting CRC is `target_crc`.
+    pub fn compute_suffix<'a, T>(&self, data: T, target_crc: u32) -> [u8; 4]
+    where
+        T: Iterator<Item = &'a u8>,
+    {
+        self.compute_suffix_core(data, target_crc)
+            .repr()
+            .to_le_bytes()
+    }
+
+    /// Compute 4-byte value inserted at offset `offset` from end in `data` so that resulting CRC is `target_crc`.
+    pub fn compute_inserted<'a, T>(&self, data: T, offset: usize, target_crc: u32) -> [u8; 4]
+    where
+        T: Iterator<Item = &'a u8> + Clone,
+    {
+        // Split data in two
+        let prefix = data.clone().take(data.clone().count() - offset);
+        let suffix = data.clone().skip(data.clone().count() - offset);
+
+        let c = Polynomial::from(PolynomialRepr::Reverse(self.checksum(data.clone())));
+        let cp = Polynomial::from(PolynomialRepr::Reverse(target_crc));
+        let f = Polynomial::from(PolynomialRepr::Reverse(self.generator.f));
+        // Cant fail because g_full is of degree 32 so remainder fits in 32 bits
+        let res: Polynomial<u32> = (((cp + f) * self.xn_inv) % self.generator.g_full)
+            .try_into()
+            .unwrap();
         let res = res + c + f;
+
+        // Compute (X^M)^-1 mod G
+        let xm = Polynomial::from(PolynomialRepr::Normal(2u64))
+            .pow(offset as u64, self.generator.g_full);
+        let xm_inv = xm.inv_mod(self.generator.g_full).unwrap();
+
+        // Compute prod = (1+X^N) * suffix mod G
+        let suffix_shifted = suffix.clone().chain([0u8; 4].iter()); // suffix * X^N
+        let prod = self.fast_rem(suffix, 0) ^ self.fast_rem(suffix_shifted, 0); // suffix * X^N + suffix mod G
+        let prod = Polynomial::from(PolynomialRepr::Reverse(prod));
+
+        let res = res + prod;
+
+        // Cant fail because g_full is of degree 32 so remainder fits in 32 bits
+        let res: Polynomial<u32> = ((res * xm_inv) % self.generator.g_full).try_into().unwrap();
         res.repr().to_le_bytes()
     }
+
+    // /// Compute 4-byte value inserted at offset `offset` from end in `data` so that resulting CRC is `target_crc`.
+    // pub fn compute_inserted<'a, T>(&self, data: T, offset: u64, target_crc: u32) -> [u8; 4]
+    // where
+    //     T: Iterator<Item = &'a u8> + Clone,
+    // {
+    //     let res = self.compute_suffix_core(
+    //         data.clone().take(data.clone().count() - offset as usize),
+    //         target_crc,
+    //     );
+
+    //     // Compute (X^M)^-1 mod G
+    //     let xm = Polynomial::from(PolynomialRepr::Normal(2u64)).pow(offset, self.generator.g_full);
+    //     let xm_inv = xm.inv_mod(self.generator.g_full).unwrap();
+
+    //     // Compute prod = (1+X^N) * suffix mod G
+    //     let suffix = data.clone().skip(data.clone().count() - offset as usize);
+    //     let suffix_shifted = suffix.clone().chain([0u8; 4].iter()); // suffix * X^N
+    //     let prod = self.fast_rem(suffix, 0) ^ self.fast_rem(suffix_shifted, 0); // suffix * X^N + suffix mod G
+    //     let prod = Polynomial::from(PolynomialRepr::Reverse(prod));
+
+    //     let res = res + prod;
+
+    //     // Cant fail because g_full is of degree 32 so remainder fits in 32 bits
+    //     let res: Polynomial<u32> = ((res * xm_inv) % self.generator.g_full).try_into().unwrap();
+    //     res.repr().to_le_bytes()
+    // }
 }
 
 impl Debug for CRC32 {
@@ -154,7 +225,20 @@ impl Debug for CRC32 {
 
 #[cfg(test)]
 mod tests {
-    use crate::{CRC32, Generator};
+    use crate::{
+        CRC32, Generator,
+        math::{Polynomial, PolynomialRepr},
+    };
+
+    #[test]
+    pub fn test_fast_rem() {
+        let crc = CRC32::new(Generator::default()).unwrap();
+        let data = 0x421234012430091u64;
+        let data_poly = Polynomial::from(PolynomialRepr::Reverse(data));
+        let rem_fast = crc.fast_rem(data.to_le_bytes().iter(), 0);
+        let rem_poly: Polynomial<u32> = (data_poly % crc.generator.g_full).try_into().unwrap();
+        assert_eq!(rem_fast, rem_poly.repr());
+    }
 
     #[test]
     pub fn test_single_letter() {
@@ -180,19 +264,36 @@ mod tests {
         let data = b"lorem ipsum";
         let c = crc.checksum(data.iter());
         let data: Vec<u8> = data.to_owned().into_iter().chain(c.to_le_bytes()).collect();
-        let newc = crc.checksum(data.iter());
-        assert_eq!(crc.checksum([0u8; 4].iter()), crc.m);
-        assert_eq!(newc, crc.m);
+        let new_c = crc.checksum(data.iter());
+        assert_eq!(new_c, crc.checksum([0u8; 4].iter()));
     }
 
     #[test]
     pub fn test_suffix() {
         let crc = CRC32::new(Generator::default()).unwrap();
         let data = b"lorem ipsum";
-        let ct = 0x42424242;
-        let suffix = crc.compute_suffix(data.iter(), ct);
+        let target_c = 0x42424242;
+        let suffix = crc.compute_suffix(data.iter(), target_c);
         let data_suffixed = [data, &suffix[..]].concat();
-        let newc = crc.checksum(data_suffixed.iter());
-        assert_eq!(newc, ct);
+        let new_c = crc.checksum(data_suffixed.iter());
+        assert_eq!(new_c, target_c);
+    }
+
+    #[test]
+    pub fn test_placeholder() {
+        let crc = CRC32::new(Generator::default()).unwrap();
+        let data = b"lorem ipsum";
+        let target_c = 0x42424242;
+        let offset = 1;
+        let inserted = crc.compute_inserted(data.iter(), offset, target_c);
+        let edited_data = [
+            &data[..data.len() - offset as usize],
+            &inserted[..],
+            &data[data.len() - offset as usize..],
+        ]
+        .concat();
+        println!("edited = {:?}", edited_data);
+        let new_c = crc.checksum(edited_data.iter());
+        assert_eq!(new_c, target_c);
     }
 }

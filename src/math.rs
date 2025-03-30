@@ -57,14 +57,6 @@ impl From<PolynomialRepr<u128>> for Polynomial<u128> {
     }
 }
 
-/*************************************************************
- * Conversion between polynomials and integer representation *
- ************************************************************/
-
-// impl<T> Into<T> for Polynomial<T> {
-
-// }
-
 /*****************************************************
  * Conversion between polynomials of different sizes *
  ****************************************************/
@@ -346,6 +338,10 @@ where
     }
 }
 
+/**********************************************
+ * Modular inverse and modular exponentiation *
+ *********************************************/
+
 impl Polynomial<u64> {
     /// Try to compute modular inverse of given polynomial mod `p`.
     pub fn inv_mod(self, p: Polynomial<u64>) -> CRCResult<Polynomial<u64>> {
@@ -383,6 +379,20 @@ impl Polynomial<u64> {
             a = b.into();
             b = r;
         }
+    }
+
+    /// Compute `self^e mod p` efficiently with exponentiation by squaring
+    pub fn pow(self, mut e: u64, p: Polynomial<u64>) -> Polynomial<u64> {
+        let mut base = self;
+        let mut ret = Polynomial::from(PolynomialRepr::Normal(1u64));
+        for _ in 0..64 {
+            if e & 1 == 1 {
+                ret = (ret * base) % p;
+            }
+            e >>= 1;
+            base = (base * base) % p;
+        }
+        return ret;
     }
 }
 
@@ -558,5 +568,20 @@ mod tests {
             (xn * xn_inv) % generator,
             Polynomial::from(PolynomialRepr::Normal(1))
         );
+    }
+
+    #[test]
+    pub fn test_mod_exp() {
+        let generator = Polynomial::from(PolynomialRepr::Normal(0x04c11db7u32));
+        let xn = Polynomial::from(PolynomialRepr::Normal(0x100000000u64));
+        let generator = xn + generator.into();
+
+        let x = Polynomial::from(PolynomialRepr::Normal(2u64));
+        let xn_modexp = x.pow(32, generator);
+        assert_eq!(xn_modexp, xn % generator);
+
+        let a = Polynomial::from(PolynomialRepr::Normal(0x12342201983048u64));
+        let a_square = (a * a) % generator;
+        assert_eq!(a.pow(2, generator), a_square);
     }
 }
