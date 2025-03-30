@@ -15,7 +15,16 @@ pub enum PolynomialRepr<T> {
 
 /// A polynomial with internal representation in reverse order.
 #[derive(Copy, Clone, PartialEq, Eq)]
-pub struct Polynomial<T>(pub T);
+pub struct Polynomial<T>(T);
+
+impl<T> Polynomial<T>
+where
+    T: Copy,
+{
+    pub fn repr(&self) -> T {
+        self.0
+    }
+}
 
 /***************************************
  * Polynomial initialization from repr *
@@ -48,6 +57,14 @@ impl From<PolynomialRepr<u128>> for Polynomial<u128> {
     }
 }
 
+/*************************************************************
+ * Conversion between polynomials and integer representation *
+ ************************************************************/
+
+// impl<T> Into<T> for Polynomial<T> {
+
+// }
+
 /*****************************************************
  * Conversion between polynomials of different sizes *
  ****************************************************/
@@ -55,36 +72,36 @@ impl From<PolynomialRepr<u128>> for Polynomial<u128> {
 impl TryFrom<Polynomial<u128>> for Polynomial<u64> {
     type Error = Error;
     fn try_from(value: Polynomial<u128>) -> Result<Self, Self::Error> {
-        if value.0 & 0xffffffffffffffff != 0 {
+        if value.repr() & 0xffffffffffffffff != 0 {
             return Err(Error::OverflowError(None));
         }
-        Ok(Polynomial((value.0 >> 64).try_into()?))
+        Ok(Polynomial((value.repr() >> 64).try_into()?))
     }
 }
 
 impl TryFrom<Polynomial<u128>> for Polynomial<u32> {
     type Error = Error;
     fn try_from(value: Polynomial<u128>) -> Result<Self, Self::Error> {
-        if value.0 & 0xffffffffffffffffffffffff != 0 {
+        if value.repr() & 0xffffffffffffffffffffffff != 0 {
             return Err(Error::OverflowError(None));
         }
-        Ok(Polynomial((value.0 >> 96).try_into()?))
+        Ok(Polynomial((value.repr() >> 96).try_into()?))
     }
 }
 
 impl TryFrom<Polynomial<u64>> for Polynomial<u32> {
     type Error = Error;
     fn try_from(value: Polynomial<u64>) -> Result<Self, Self::Error> {
-        if value.0 & 0xffffffff != 0 {
+        if value.repr() & 0xffffffff != 0 {
             return Err(Error::OverflowError(None));
         }
-        Ok(Polynomial((value.0 >> 32).try_into()?))
+        Ok(Polynomial((value.repr() >> 32).try_into()?))
     }
 }
 
 impl From<Polynomial<u64>> for Polynomial<u128> {
     fn from(value: Polynomial<u64>) -> Self {
-        Self(u128::from(value.0) << 64)
+        Self(u128::from(value.repr()) << 64)
     }
 }
 
@@ -96,7 +113,7 @@ impl From<Polynomial<u32>> for Polynomial<u128> {
 
 impl From<Polynomial<u32>> for Polynomial<u64> {
     fn from(value: Polynomial<u32>) -> Self {
-        Self(u64::from(value.0) << 32)
+        Self(u64::from(value.repr()) << 32)
     }
 }
 
@@ -107,10 +124,11 @@ impl From<Polynomial<u32>> for Polynomial<u64> {
 impl<T> Add<Polynomial<T>> for Polynomial<T>
 where
     T: BitXor<T, Output = T>,
+    T: Copy,
 {
     type Output = Polynomial<T>;
     fn add(self, rhs: Polynomial<T>) -> Self::Output {
-        Polynomial(self.0 ^ rhs.0)
+        Polynomial(self.repr() ^ rhs.repr())
     }
 }
 
@@ -125,9 +143,9 @@ where
     type Output = Polynomial<u128>;
     fn mul(self, rhs: T) -> Self::Output {
         let rhs = rhs.into();
-        let mut self_bits = self.0;
+        let mut self_bits = self.repr();
         let mut res_bits = 0u128;
-        let rhs_bits = rhs.0;
+        let rhs_bits = rhs.repr();
         for i in (0..64).rev() {
             if self_bits & 1 == 1 {
                 res_bits ^= u128::from(rhs_bits) << (64 - i);
@@ -168,12 +186,12 @@ where
     fn div(self, rhs: T) -> Self::Output {
         let rhs = rhs.into();
         let mut res: u128 = 0;
-        let mut self_bits = self.0;
+        let mut self_bits = self.repr();
         let rhs_deg = rhs.deg();
         // Number of check steps to perform
         let steps = (128 - rhs_deg) as u32;
         // Remove highest degree term (it is shifted anyway)
-        let (rhs_bits, _) = rhs.0.overflowing_shr(steps);
+        let (rhs_bits, _) = rhs.repr().overflowing_shr(steps);
 
         for _ in 0..steps {
             res <<= 1;
@@ -221,12 +239,12 @@ where
 impl Rem<Polynomial<u128>> for Polynomial<u128> {
     type Output = Polynomial<u128>;
     fn rem(self, modulo: Polynomial<u128>) -> Self::Output {
-        let mut self_bits: u128 = self.0;
+        let mut self_bits: u128 = self.repr();
         let modulo_deg = modulo.deg();
         // Number of check steps to perform
         let steps = (128 - modulo_deg) as u32;
         // Remove the highest degree term (it is shifted anyway)
-        let (modulo_bits, _) = modulo.0.overflowing_shr(steps);
+        let (modulo_bits, _) = modulo.repr().overflowing_shr(steps);
 
         for _ in 0..steps {
             let div = self_bits & 1;
@@ -313,9 +331,10 @@ impl Rem<Polynomial<u32>> for Polynomial<u32> {
 impl<T> Polynomial<T>
 where
     T: Into<u128>,
+    T: Copy,
 {
     pub fn deg(self) -> u32 {
-        let mut self_bits = self.0.into();
+        let mut self_bits = self.repr().into();
         let maxdeg = 8 * size_of::<T>() - 1;
         for i in 0..(maxdeg + 1) {
             if self_bits & 1 == 1 {
@@ -341,7 +360,7 @@ impl Polynomial<u64> {
         let mut vn_1 = Polynomial::from(PolynomialRepr::Normal(1u64));
 
         loop {
-            if b.0 == 0 {
+            if b.repr() == 0 {
                 return Err(Error::NonInvertibleError);
             }
 
@@ -373,7 +392,7 @@ impl Polynomial<u64> {
 
 impl Debug for Polynomial<u128> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut bits = self.0;
+        let mut bits = self.repr();
         let mut terms = Vec::<usize>::new();
         for i in (0..128).rev() {
             let coef = bits & 1;
