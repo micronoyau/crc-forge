@@ -21,6 +21,7 @@ impl<T> Polynomial<T>
 where
     T: Copy,
 {
+    /// Returns the internally used reverse representation of the polynomial.
     pub fn repr(&self) -> T {
         self.0
     }
