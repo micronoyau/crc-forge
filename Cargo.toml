@@ -1,6 +1,17 @@
 [package]
-name = "crc"
+name = "crc-forge"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+test = true
+doc = true
+crate-type = ["lib"]
+
+[[bin]]
+name = "crc-forge"
+test = true
+doc = true
+
 [dependencies]
+clap = { version = "4.5.35", features = ["derive"] }
