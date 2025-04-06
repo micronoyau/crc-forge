@@ -87,7 +87,7 @@ impl CRC32 {
     /// `data` is the data to process and `reg` is the initial CRC register.
     fn fast_rem<T>(&self, mut data: T, mut reg: u32) -> CRCResult<u32>
     where
-        T: Iterator<Item = CRCResult<u8>>,
+        T: Iterator<Item = Result<u8, std::io::Error>>,
     {
         // Step through division
         while let Some(b) = data.next() {
@@ -101,7 +101,7 @@ impl CRC32 {
     /// `data` is the data to process, `i` is the initial XOR mask, `f` is the final XOR mask.
     pub fn checksum<T>(&self, data: T) -> CRCResult<u32>
     where
-        T: Iterator<Item = CRCResult<u8>>,
+        T: Iterator<Item = Result<u8, std::io::Error>>,
     {
         // CRC is remainder of data times X^N where N = deg(G)
         // In CRC32, N = 32 bits
@@ -139,7 +139,7 @@ impl CRC32 {
     /// Compute suffix polynomial to `data` so that resulting CRC is `target_crc`.
     fn compute_suffix_polynomial<T>(&self, data: T, target_crc: u32) -> CRCResult<Polynomial<u32>>
     where
-        T: Iterator<Item = Result<u8, Error>>,
+        T: Iterator<Item = Result<u8, std::io::Error>>,
     {
         let c = Polynomial::from(PolynomialRepr::Reverse(self.checksum(data)?));
         let cp = Polynomial::from(PolynomialRepr::Reverse(target_crc));
@@ -152,7 +152,7 @@ impl CRC32 {
     /// Compute 4-byte suffix to `data` so that resulting CRC is `target_crc`.
     pub fn compute_suffix<T>(&self, data: T, target_crc: u32) -> CRCResult<[u8; 4]>
     where
-        T: Iterator<Item = Result<u8, Error>>,
+        T: Iterator<Item = Result<u8, std::io::Error>>,
     {
         Ok(self
             .compute_suffix_polynomial(data, target_crc)?
@@ -176,7 +176,7 @@ impl CRC32 {
         mut reg: u32,
     ) -> CRCResult<(u32, u32, usize)>
     where
-        T: Iterator<Item = CRCResult<u8>>,
+        T: Iterator<Item = std::io::Result<u8>>,
         U: Iterator<Item = u8>,
     {
         let mut size = 0;
@@ -199,7 +199,7 @@ impl CRC32 {
         target_crc: u32,
     ) -> CRCResult<Polynomial<u32>>
     where
-        T: Iterator<Item = CRCResult<u8>>,
+        T: Iterator<Item = std::io::Result<u8>>,
     {
         // Compute inserted polynomial: ((C' + F) X^N^-1 + C + F + suffix (1 + X^N)) X^M^-1 mod G
         // Constraint: T cannot be cloned to seek in byte stream (network stream for example)
@@ -244,7 +244,7 @@ impl CRC32 {
     /// Compute inserted polynomial at offset `offset` of `data` so that resulting CRC is `target_crc`.
     pub fn compute_inserted<T>(&self, data: T, offset: usize, target_crc: u32) -> CRCResult<[u8; 4]>
     where
-        T: Iterator<Item = CRCResult<u8>>,
+        T: Iterator<Item = std::io::Result<u8>>,
     {
         Ok(self
             .compute_inserted_polynomial(data, offset, target_crc)?
@@ -274,6 +274,8 @@ impl Debug for CRC32 {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use crate::core::{CRC32, CRC32Properties};
     use crate::error::Error;
     use crate::math::{Polynomial, PolynomialRepr};
@@ -331,7 +333,7 @@ mod tests {
         let data = 0x421234012430091u64;
         let data_poly = Polynomial::from(PolynomialRepr::Reverse(data));
         let rem_fast = crc
-            .fast_rem(data.to_le_bytes().into_iter().map(|elem| Ok(elem)), 0)
+            .fast_rem(data.to_le_bytes().bytes(), 0)
             .expect("Failed to compute fast remainder");
         let rem_poly: Polynomial<u32> = (data_poly % crc.g)
             .try_into()
@@ -353,7 +355,7 @@ mod tests {
 
         // First compute checksum using tables
         let c = crc
-            .checksum(data_bytes.into_iter().map(|elem| Ok(elem)))
+            .checksum(data_bytes.bytes())
             .expect("Failed to compute checksum");
         println!(
             "Real CRC = 0x{:x} = {:?}",
@@ -379,7 +381,7 @@ mod tests {
     pub fn test_single_letter() {
         let crc = CRC32::new(CRC32Properties::default()).unwrap();
         assert_eq!(
-            crc.checksum(b"a".to_owned().into_iter().map(|elem| Ok(elem)))
+            crc.checksum(b"a".to_owned().bytes())
                 .expect("Failed to computed checksum"),
             0xe8b7be43
         );
@@ -389,7 +391,7 @@ mod tests {
     pub fn test_empty() {
         let crc = CRC32::new(CRC32Properties::default()).unwrap();
         assert_eq!(
-            crc.checksum([].into_iter().map(|elem| Ok(elem)))
+            crc.checksum([].bytes())
                 .expect("Failed to compute checksum"),
             0
         );
@@ -399,7 +401,7 @@ mod tests {
     pub fn test_hello() {
         let crc = CRC32::new(CRC32Properties::default()).unwrap();
         assert_eq!(
-            crc.checksum(b"hello, world!".to_owned().into_iter().map(|elem| Ok(elem)))
+            crc.checksum(b"hello, world!".to_owned().bytes())
                 .expect("Failed to compute checksum"),
             0x58988d13
         );
@@ -410,15 +412,15 @@ mod tests {
         let crc = CRC32::new(CRC32Properties::default()).unwrap();
         let data = b"lorem ipsum".to_owned();
         let c = crc
-            .checksum(data.into_iter().map(|elem| Ok(elem)))
+            .checksum(data.bytes())
             .expect("Failed to compute checksum");
         let data: Vec<u8> = data.into_iter().chain(c.to_le_bytes()).collect();
         let new_c = crc
-            .checksum(data.into_iter().map(|elem| Ok(elem)))
+            .checksum(data.bytes())
             .expect("Failed to compute checksum");
         assert_eq!(
             new_c,
-            crc.checksum([0u8; 4].into_iter().map(|elem| Ok(elem)))
+            crc.checksum([0u8; 4].bytes())
                 .expect("Failed to compute checksum")
         );
     }
@@ -429,11 +431,11 @@ mod tests {
         let data = b"lorem ipsum";
         let target_c = 0x42424242;
         let suffix = crc
-            .compute_suffix(data.to_owned().into_iter().map(|elem| Ok(elem)), target_c)
+            .compute_suffix(data.bytes(), target_c)
             .expect("Failed to compute suffix");
         let data_suffixed = [data, &suffix[..]].concat();
         let new_c = crc
-            .checksum(data_suffixed.into_iter().map(|elem| Ok(elem)))
+            .checksum(data_suffixed.bytes())
             .expect("Failed to compute checksum");
         assert_eq!(new_c, target_c);
     }
@@ -444,11 +446,11 @@ mod tests {
         let data = b"d";
         let target_c = 0x42424242;
         let suffix = crc
-            .compute_suffix(data.to_owned().into_iter().map(|elem| Ok(elem)), target_c)
+            .compute_suffix(data.to_owned().bytes(), target_c)
             .expect("Failed to compute suffix");
         let data_suffixed = [data, &suffix[..]].concat();
         let new_c = crc
-            .checksum(data_suffixed.into_iter().map(|elem| Ok(elem)))
+            .checksum(data_suffixed.bytes())
             .expect("Failed to compute checksum");
         assert_eq!(new_c, target_c);
     }
@@ -461,7 +463,7 @@ mod tests {
         let target_c = 0x42424242;
         let offset = data.len();
         let inserted = crc
-            .compute_inserted(data.into_iter().map(|elem| Ok(elem)), offset, target_c)
+            .compute_inserted(data.bytes(), offset, target_c)
             .expect("Failed to compute inserted data");
         let edited_data = [
             &data[..offset as usize],
@@ -471,7 +473,7 @@ mod tests {
         .concat();
         println!("edited = {:?}", edited_data);
         let new_c = crc
-            .checksum(edited_data.into_iter().map(|elem| Ok(elem)))
+            .checksum(edited_data.bytes())
             .expect("Failed to compute checksum");
         assert_eq!(new_c, target_c);
     }
@@ -484,7 +486,7 @@ mod tests {
         let target_c = 0x42424242;
         let offset = 2;
         let inserted = crc
-            .compute_inserted(data.into_iter().map(|elem| Ok(elem)), offset, target_c)
+            .compute_inserted(data.bytes(), offset, target_c)
             .expect("Failed to compute inserted data");
         let edited_data = [
             &data[..offset as usize],
@@ -494,7 +496,7 @@ mod tests {
         .concat();
         println!("edited = {:?}", edited_data);
         let new_c = crc
-            .checksum(edited_data.into_iter().map(|elem| Ok(elem)))
+            .checksum(edited_data.bytes())
             .expect("Failed to compute checksum");
         assert_eq!(new_c, target_c);
     }
@@ -507,7 +509,7 @@ mod tests {
         let offset = 42;
 
         let inserted = crc
-            .compute_inserted(data.into_iter().map(|elem| Ok(elem)), offset, target_c)
+            .compute_inserted(data.bytes(), offset, target_c)
             .expect("Failed to compute inserted data");
         let edited_data = [
             &data[..offset as usize],
@@ -517,7 +519,7 @@ mod tests {
         .concat();
         println!("edited = {:?}", edited_data);
         let new_c = crc
-            .checksum(edited_data.into_iter().map(|elem| Ok(elem)))
+            .checksum(edited_data.bytes())
             .expect("Failed to compute checksum");
         assert_eq!(new_c, target_c);
     }
@@ -529,8 +531,7 @@ mod tests {
         let target_c = 0x42424242;
         let offset = data.len() + 1;
 
-        let inserted =
-            crc.compute_inserted(data.into_iter().map(|elem| Ok(elem)), offset, target_c);
+        let inserted = crc.compute_inserted(data.bytes(), offset, target_c);
         assert!(inserted.is_err_and(|x| match x {
             Error::OutOfBoundsError => true,
             _ => false,
